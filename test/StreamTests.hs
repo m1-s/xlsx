@@ -166,13 +166,13 @@ readWriteConduitNoSst input = do
       throwIO x
 readWriteMultipleSheets :: Xlsx -> IO ()
 readWriteMultipleSheets input = do
-  BS.writeFile "testinput.xlsx" (toBs input)
+  BS.writeFile "testinput.xlsx" $ toBs input
   sheetNamesAndConduits <- runXlsxM "testinput.xlsx" $ do
     sheets <- reverse . _wiSheets <$> getWorkbookInfo
     let sheetCount = length sheets
-    sheetItems <- mapM (collectItems . makeIndex) [1..sheetCount]
     let sheetNames = map sheetInfoName sheets
-    let sheetConduits = map (C.yieldMany . toListOf (traversed . si_row)) sheetItems
+    sheetConduits <- map (C.yieldMany . toListOf (traversed . si_row))
+      <$> mapM (collectItems . makeIndex) [1..sheetCount]
     pure $ zip sheetNames sheetConduits
 
   bs <- runConduitRes $ void (SW.writeXlsxMultipleSheets SW.defaultSettings sheetNamesAndConduits) .| C.foldC
