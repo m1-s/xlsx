@@ -1,5 +1,6 @@
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE QuasiQuotes       #-}
+{-# LANGUAGE PackageImports #-}
 {-# LANGUAGE TupleSections     #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE TypeApplications #-}
@@ -20,17 +21,21 @@ tests = testGroup
     []
 #else
 
+import qualified "zip" Codec.Archive.Zip as Zip
 import Control.Exception
 import Codec.Archive.Zip as Zip
 import Codec.Xlsx
 import Codec.Xlsx.Parser.Stream
 import Conduit ((.|))
 import qualified Conduit as C
+import qualified Data.Conduit.Combinators as CC
+import Control.Exception (bracket)
 import Control.Lens hiding (indexed)
 import Control.Monad (void)
 import Data.Set.Lens
 import qualified Data.ByteString.Lazy as LB
 import qualified Data.ByteString as BS
+import qualified Data.List as Lst
 import Data.Map (Map)
 import qualified Data.Conduit.Combinators as C
 import qualified Data.Map as M
@@ -88,6 +93,20 @@ tests =
         $ readWriteMultipleSheets multipleSheetsWorkbook
       -- , testCase "Write as stream, see if memory based implementation can read it" $ readWrite testXlsx
       -- TODO forall SheetItem write that can be read
+
+      , testGroup "Conduit"
+        [ testCase "Write as stream, using conduit parser (simpleWorkbook)" $ readWriteConduit simpleWorkbook
+        , testCase "Write as stream, using conduit parser (simpleWorkbookRow)" $ readWriteConduit simpleWorkbookRow
+        , testCase "Write as stream, using conduit parser (bigWorkbook)" $ readWriteConduit bigWorkbook
+        , testGroup "No sst"
+          [ testCase "Write as stream, using conduit parser (simpleWorkbook)" $ readWriteConduitNoSst simpleWorkbook
+          , testCase "Write as stream, using conduit parser (simpleWorkbookRow)" $ readWriteConduitNoSst simpleWorkbookRow
+          , testCase "Write as stream, using conduit parser (bigWorkbook)" $ readWriteConduitNoSst bigWorkbook
+          ]
+        , testGroup "Reader/shared strings"
+          [ testCase "Can parse RichText values" richCellTextIsParsedConduit
+          ]
+        ]
       ],
 
       testGroup "Reader/inline strings"
@@ -110,6 +129,41 @@ readWrite input = do
     Left x -> do
       throwIO x
 
+readWriteConduit :: Xlsx -> IO ()
+readWriteConduit input = do
+  BS.writeFile "testinput.xlsx" (toBs input)
+  bs <- runXlsxM "testinput.xlsx" $ do
+    mConduit <- getSheetConduit $ makeIndex 1
+    case mConduit of
+      Nothing -> error "sheet should exist"
+      Just conduit -> liftIO $ runConduitRes $ void (SW.writeXlsx SW.defaultSettings (conduit .| CC.map (view si_row))) .| C.foldC
+
+  case toXlsxEither $ LB.fromStrict bs of
+    Right result  ->
+      input @==?  result
+    Left x -> do
+      throwIO x
+
+-- No sst behaves differently frmo the normal writexlsx because
+-- the sst table isn't first constructed.
+-- this results in a single pass instead of a double pass.
+-- it turns out that in certain cases this test would pass
+-- but the writeXlsx wouldn't, which indicates brittleness within
+-- the statefull hexpat parser.
+readWriteConduitNoSst :: Xlsx -> IO ()
+readWriteConduitNoSst input = do
+  BS.writeFile "testinput.xlsx" (toBs input)
+  bs <- runXlsxM "testinput.xlsx" $ do
+    mConduit <- getSheetConduit $ makeIndex 1
+    case mConduit of
+      Nothing -> error "sheet should exist"
+      Just conduit -> liftIO $ runConduitRes $ void (SW.writeXlsxWithSharedStrings SW.defaultSettings mempty [(conduit .| CC.map (view si_row))]) .| C.foldC
+
+  case toXlsxEither $ LB.fromStrict bs of
+    Right result  ->
+      input @==?  result
+    Left x -> do
+      throwIO x
 readWriteMultipleSheets :: Xlsx -> IO ()
 readWriteMultipleSheets input = do
   BS.writeFile "testinput.xlsx" (toBs input)
@@ -292,6 +346,47 @@ richCellTextIsParsed = do
       , ((RowIndex 2, ColumnIndex 1), cellValue ?~ cellRich firstClauseB1 secondClauseB1 $ def)
       , ((RowIndex 2, ColumnIndex 2), cellValue ?~ cellRich firstClauseB2 secondClauseB2 $ def)
       ]
+
+richCellTextIsParsedConduit :: IO ()
+richCellTextIsParsedConduit = do
+  BS.writeFile "testinput.xlsx" (toBs richWorkbook)
+  runXlsxM "testinput.xlsx" $ do
+    mConduit <- getSheetConduit (makeIndex 1)
+    case mConduit of
+      Just conduit -> do
+        lst <- liftIO $ runConduitRes $ conduit .| CC.sinkList
+        let result = Lst.sort $ concatMap mkItemInfo lst
+        liftIO $ expected @==? result
+      Nothing -> error "getSheetConduit result is Nothing"
+
+  where
+
+  mkItemInfo :: SheetItem -> [(Int, Int, Maybe CellValue)]
+  mkItemInfo item =
+    let row = _si_row item
+        rowIndex = unRowIndex $ _ri_row_index row
+        mkInfo (cellIndex, cell) = (rowIndex, cellIndex, _cellValue cell)
+    in fmap mkInfo . IM.toList $ _ri_cell_row row
+
+  expected :: [(Int, Int, Maybe CellValue)]
+  expected =
+    [ (1, 1, Just $ CellText textA1)
+    , (2, 1, Just $ CellText $ firstClauseB1 <> secondClauseB1)
+    , (2, 2, Just $ CellText $ firstClauseB2 <> secondClauseB2)
+    ]
+
+  textA1 = "Text at A1"
+  firstClauseB1 = "First clause at B1;"
+  firstClauseB2 = "First clause at B2;"
+  secondClauseB1 = "Second clause at B1"
+  secondClauseB2 = "Second clause at B2"
+
+  richWorkbook :: Xlsx
+  richWorkbook = def & atSheet "Sheet1" ?~ toWs
+    [ ((RowIndex 1, ColumnIndex 1), cellValue ?~ CellText textA1 $ def)
+    , ((RowIndex 2, ColumnIndex 1), cellValue ?~ cellRich firstClauseB1 secondClauseB1 $ def)
+    , ((RowIndex 2, ColumnIndex 2), cellValue ?~ cellRich firstClauseB2 secondClauseB2 $ def)
+    ]
 
 cellRich :: Text -> Text -> CellValue
 cellRich firstClause secondClause = CellRich
