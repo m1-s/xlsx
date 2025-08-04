@@ -157,7 +157,7 @@ readWriteConduitNoSst input = do
     mConduit <- getSheetConduit $ makeIndex 1
     case mConduit of
       Nothing -> error "sheet should exist"
-      Just conduit -> liftIO $ runConduitRes $ void (SW.writeXlsxWithSharedStrings SW.defaultSettings mempty [(conduit .| CC.map (view si_row))]) .| C.foldC
+      Just conduit -> liftIO $ runConduitRes $ void (SW.writeXlsxWithSharedStrings SW.defaultSettings mempty [("Sheet1", (conduit .| CC.map (view si_row)))]) .| C.foldC
 
   case toXlsxEither $ LB.fromStrict bs of
     Right result  ->
@@ -167,12 +167,15 @@ readWriteConduitNoSst input = do
 readWriteMultipleSheets :: Xlsx -> IO ()
 readWriteMultipleSheets input = do
   BS.writeFile "testinput.xlsx" (toBs input)
-  sheetConduits <- runXlsxM "testinput.xlsx" $ do
-    sheetCount <- length . _wiSheets <$> getWorkbookInfo
+  sheetNamesAndConduits <- runXlsxM "testinput.xlsx" $ do
+    sheets <- reverse . _wiSheets <$> getWorkbookInfo
+    let sheetCount = length sheets
     sheetItems <- mapM (collectItems . makeIndex) [1..sheetCount]
-    pure $ map (C.yieldMany . toListOf (traversed . si_row)) sheetItems
+    let sheetNames = map sheetInfoName sheets
+    let sheetConduits = map (C.yieldMany . toListOf (traversed . si_row)) sheetItems
+    pure $ zip sheetNames sheetConduits
 
-  bs <- runConduitRes $ void (SW.writeXlsxMultipleSheets SW.defaultSettings sheetConduits) .| C.foldC
+  bs <- runConduitRes $ void (SW.writeXlsxMultipleSheets SW.defaultSettings sheetNamesAndConduits) .| C.foldC
   case toXlsxEither $ LB.fromStrict bs of
     Right result  -> input @==? result
     Left x -> throwIO x
@@ -271,7 +274,7 @@ bigWorkbook = def & atSheet "Sheet1" ?~ sheet
 --      )]
 
 multipleSheetsWorkbook :: Xlsx
-multipleSheetsWorkbook = simpleWorkbook & atSheet "Sheet2" ?~ sheet
+multipleSheetsWorkbook = simpleWorkbook & atSheet "my Sheet 2" ?~ sheet
   where
     sheet = toWs [ ((RowIndex 1, ColumnIndex 1), cellValue ?~ CellText "text at A1 Sheet2" $ def)
                  , ((RowIndex 1, ColumnIndex 2), cellValue ?~ CellText "text at B1 Sheet2" $ def) ]
