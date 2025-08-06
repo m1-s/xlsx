@@ -36,7 +36,7 @@ import Codec.Xlsx.Types (ColumnsProperties (..), RowProperties (..),
                          emptyStyles, rowHeightLens)
 import Codec.Xlsx.Types.Cell
 import Codec.Xlsx.Types.Common
-import Codec.Xlsx.Types.Internal.Relationships (odr, pr)
+import Codec.Xlsx.Types.Internal.Relationships (odr, pr, odRelNs)
 import Codec.Xlsx.Types.SheetViews
 import Codec.Xlsx.Writer.Internal (nonEmptyElListSimple, toAttrVal, toElement,
                                    txtd, txti)
@@ -126,8 +126,6 @@ defaultSettings = MkSheetWriteSettings
   }
   }
 
-
-
 -- | Transform a 'Row' stream into a stream that creates the xlsx file format
 --   (to be consumed by sinkfile for example)
 --  This first runs 'sharedStrings' and then 'writeXlsxWithSharedStrings'.
@@ -188,13 +186,14 @@ combinedFiles :: PrimMonad m
 combinedFiles settings sharedStrings' sheets =
   let zippedSheets = map (\(sheetId, rowConduit) ->
         ( zipEntry ("xl/worksheets/sheet" <> Text.pack (show sheetId) <> ".xml")
-        , ZipDataSource $ rowConduit .| C.runReaderC settings (writeWorkSheet sharedStrings') .| eventsToBS
+        , ZipDataSource $ rowConduit .| C.runReaderC settings (writeWorkSheet sharedStrings') .| renderBuilder ( def {rsNamespaces=[("r", odRelNs)]}) .| C.builderToByteString
         )) $ zip [1..(length sheets)] $ map snd sheets
   in
   C.yieldMany $
     [ (zipEntry "xl/sharedStrings.xml", ZipDataSource $ writeSst sharedStrings' .| eventsToBS)
     , (zipEntry "[Content_Types].xml", ZipDataSource $ writeContentTypes .| eventsToBS)
-    , (zipEntry "xl/workbook.xml", ZipDataSource $ writeWorkbook (map fst sheets) .| eventsToBS)
+    , (zipEntry "xl/workbook.xml", ZipDataSource $ writeWorkbook (map fst sheets)
+    .| renderBuilder ( def {rsNamespaces=[("r", odRelNs)]}) .| C.builderToByteString)
     , (zipEntry "xl/styles.xml", ZipDataByteString $ coerce $ settings ^. wsStyles)
     , (zipEntry "xl/_rels/workbook.xml.rels", ZipDataSource $ writeWorkbookRels (length sheets) .| eventsToBS)
     , (zipEntry "_rels/.rels", ZipDataSource $ writeRootRels .| eventsToBS)
@@ -228,7 +227,8 @@ writeWorkbook sheetNames =
   let addSheet (sheetId, sheetName) = tag (n_ "sheet")
           (attr "name" sheetName
           <> attr "sheetId" (Text.pack $ show sheetId)
-          <> attr (odr "id") ("rId" <> (Text.pack $ show (sheetId + 2)))
+          <> attr (Name "r:id" Nothing Nothing)
+            ("rId" <> (Text.pack $ show (sheetId + 2)))
           ) $ pure ()
       sheetIdAndName = zip [1..(length sheetNames)] sheetNames
   in doc (n_ "workbook") $
